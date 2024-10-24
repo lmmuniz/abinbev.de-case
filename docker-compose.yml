@@ -1,0 +1,126 @@
+version: '3.8'
+x-airflow-common:
+  &airflow-common
+  image: apache/airflow:2.9.2
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: FB0o_zt4e3Ziq3LdUUO7F2Z95cvFFx16hU8jTeR1ASM=
+    AIRFLOW__CORE__LOAD_EXAMPLES: False
+    AIRFLOW__CORE__LOGGING_LEVEL: INFO
+    AIRFLOW__WEBSERVER__SECRET_KEY: C\x0e\xa0&\xa2\xbc\x02\x95\xfc\x1c'aQ\x17\x90\x07
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-apache-airflow-providers-amazon openpyxl==3.1.2 XlsxWriter==3.2.0 apache-airflow-providers-apache-spark}
+  user: "${AIRFLOW_UID:-50000}:0"
+  volumes:
+    - ./storage/airflow/dags:/opt/airflow/dags # DAGs folder
+    - ./storage/airflow/logs:/usr/local/airflow/logs
+    - ./storage/airflow/plugins:/usr/local/airflow/plugins
+    - ./storage/airflow/config/airflow.cfg:/usr/local/airflow/airflow.cfg
+    - ./storage/spark/app:/usr/local/spark/app # Spark Scripts (same path in airflow and spark)
+    - ./storage/spark/resources:/usr/local/spark/resources # Spark Resources (same path in airflow and spark)
+    - ./storage/datalake:/usr/local/datalake:rw
+  depends_on:
+    - postgres
+
+services:
+  postgres:
+    image: postgres:12
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=airflow
+      - POSTGRES_PORT=5432
+    ports:
+      - "5432:5432"
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow_init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        chown -R "${AIRFLOW_UID}:0" /usr/local/airflow /usr/local/datalake
+        airflow db init &&
+        airflow users create \
+          --role Admin \
+          --username airflow \
+          --password airflow \
+          --email airflow@airflow.com \
+          --firstname airflow \
+          --lastname airflow
+    restart: on-failure
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: airflow webserver
+    ports:
+      - "8080:8080"
+    container_name: airflow_webserver
+    restart: always
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: airflow scheduler
+    container_name: airflow_scheduler
+    restart: always
+
+  # Spark with N workers
+  spark-master:
+    image: bitnami/spark:latest
+    hostname: spark
+    networks:
+      - default_net
+    environment:
+      - SPARK_MODE=master
+      - JAVA_HOME=/opt/bitnami/java
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    volumes:
+      - ./storage/spark/app:/usr/local/spark/app
+      - ./storage/spark/resources:/usr/local/spark/resources
+      - ./storage/datalake:/usr/local/datalake:rw
+    ports:
+      - "8081:8080"
+      - "7077:7077"
+    restart: always
+
+  spark-worker:
+    image: bitnami/spark:latest
+    networks:
+      - default_net
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark:7077
+      - SPARK_WORKER_MEMORY=1G
+      - SPARK_WORKER_CORES=1
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    volumes:
+      - ./storage/spark/app:/usr/local/spark/app
+      - ./storage/spark/resources:/usr/local/spark/resources
+      - ./storage/datalake:/usr/local/datalake:rw
+    restart: always
+
+  # Jupyter Notebooks
+  jupyter-pyspark:
+    image: jupyter/pyspark-notebook:spark-3.2.1
+    networks:
+      - default_net
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./storage/notebooks:/home/jovyan/
+      - ./storage/spark/app:/usr/local/spark/app
+      - ./storage/spark/resources:/usr/local/spark/resources
+      - ./storage/datalake:/usr/local/datalake:rw
+
+networks:
+  default_net:
+  
+volumes:
+  postgres_data:
